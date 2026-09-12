@@ -1,4 +1,4 @@
-import { copyFile, mkdir, writeFile, readFile, stat } from 'fs/promises'
+import { copyFile, mkdir, readFile, stat } from 'fs/promises'
 import vm from 'vm'
 import { existsSync, writeFileSync } from 'fs'
 import path from 'path'
@@ -25,12 +25,37 @@ import { deepMerge } from '../utils/merge'
 import { createLogger } from '../utils/logger'
 import { decryptAgeContent } from '../utils/age'
 import { DEFAULT_CONTROL_DNS, DEFAULT_CONTROL_SNIFF } from '../../shared/appConfig'
+import { atomicWriteFile } from '../utils/safeFile'
+import { evaluateDnsOverrideGuard, type DnsOverrideGuardResult } from './dnsOverrideGuard'
 
 const factoryLogger = createLogger('Factory')
 const SMART_OVERRIDE_ID = 'smart-core-override'
 
 let runtimeConfigStr: string = ''
 let runtimeConfig: IMihomoConfig = {} as IMihomoConfig
+
+interface GenerateProfileOptions {
+  profileId?: string
+  baseProfile?: IMihomoConfig
+  ageSecretKey?: string
+  profileOverrideIds?: string[]
+  // 调用方已读取的全局 override id 集合：给出时不再自行读取，生成所用的集合与调用方记录的完全一致
+  //（插件订阅校验用它把"参与校验的集合"绑定到校验本身）
+  globalOverrideIds?: string[]
+  outputPath?: string
+  updateRuntimeConfig?: boolean
+}
+
+export interface GenerateProfileResult {
+  profileId: string | undefined
+  // 随本次配置成功应用后同步。
+  dnsGuard: DnsOverrideGuardResult
+}
+
+export async function globalOverrideIdsNow(): Promise<string[]> {
+  const { items = [] } = (await getOverrideConfig()) || {}
+  return items.filter((item) => item.global).map((item) => item.id)
+}
 
 // 辅助函数：处理带偏移量的规则
 function processRulesWithOffset(ruleStrings: string[], currentRules: string[], isAppend = false) {
@@ -106,31 +131,49 @@ function ensureSmartProxyServerTunExclude(profile: IMihomoConfig, enabled: boole
   return added
 }
 
-export async function generateProfile(): Promise<string | undefined> {
-  // 读取最新的配置
-  const { current } = await getProfileConfig(true)
+export async function generateProfile(
+  pendingControledMihomoConfig?: Partial<IMihomoConfig>,
+  options: GenerateProfileOptions = {}
+): Promise<GenerateProfileResult> {
+  // 第一阶段：并行读取互不依赖的配置（强制重读 profileConfig 完成后再进入第二阶段，保证缓存一致）。
+  const [profileConfig, appConfig] = await Promise.all([getProfileConfig(true), getAppConfig()])
+  const { current } = profileConfig
+  const profileId = options.profileId ?? current
+  // 第二阶段：仅依赖 profileId 的读取并行执行。
+  const [currentProfileItem, baseProfile, overrideIds, fetchedControledMihomoConfig] =
+    await Promise.all([
+      getProfileItem(profileId),
+      options.baseProfile ?? getProfile(profileId),
+      getOrderedOverrideIds(profileId, options.profileOverrideIds, options.globalOverrideIds),
+      getControledMihomoConfig()
+    ])
+  const ageSecretKey = options.ageSecretKey ?? currentProfileItem?.ageSecretKey ?? ''
+  let controledMihomoConfig = pendingControledMihomoConfig ?? fetchedControledMihomoConfig
   const {
     diffWorkDir = false,
-    controlDns = DEFAULT_CONTROL_DNS,
+    controlDns: controlDnsSetting = DEFAULT_CONTROL_DNS,
     controlSniff = DEFAULT_CONTROL_SNIFF,
     useNameserverPolicy
-  } = await getAppConfig()
-  const currentProfileItem = await getProfileItem(current)
-  const ageSecretKey = currentProfileItem?.ageSecretKey || ''
-  const baseProfile = await getProfile(current)
-  const overrideIds = await getOrderedOverrideIds(current)
+  } = appConfig
+  // DNS 保护先于覆写和脚本处理，开关在内核应用成功后同步。
+  const dnsGuard = evaluateDnsOverrideGuard(
+    profileId ?? 'default',
+    baseProfile,
+    controlDnsSetting,
+    options.updateRuntimeConfig !== false
+  )
+  const { controlDns } = dnsGuard
   const profileWithNormalOverride = await applyOverrides(
     baseProfile,
     overrideIds.normal,
     ageSecretKey
   )
-  const profileWithRuleOverride = await applyRuleOverride(current, profileWithNormalOverride)
+  const profileWithRuleOverride = await applyRuleOverride(profileId, profileWithNormalOverride)
   const currentProfile = await applyOverrides(
     profileWithRuleOverride,
     overrideIds.smart,
     ageSecretKey
   )
-  let controledMihomoConfig = await getControledMihomoConfig()
 
   // 根据开关状态过滤控制配置
   controledMihomoConfig = { ...controledMihomoConfig }
@@ -161,25 +204,41 @@ export async function generateProfile(): Promise<string | undefined> {
       addedProxyServerRouteExcludes
     )
   }
-  // 确保可以拿到基础日志信息
-  // 使用 debug 可以调试内核相关问题 `debug/pprof`
-  if (['info', 'debug'].includes(profile['log-level']) === false) {
-    profile['log-level'] = 'info'
-  }
   // 删除空的局域网允许列表，避免局域网访问异常
   if (!profile['lan-allowed-ips']?.length) {
     delete profile['lan-allowed-ips']
   }
-  runtimeConfig = profile
-  runtimeConfigStr = stringify(profile)
-  if (diffWorkDir) {
-    await prepareProfileWorkDir(current)
+  // WebUI 仅在外部控制器启用时有效；关闭面板时不向 Mihomo 写入下载地址。
+  const partialProfile = profile as Partial<IMihomoConfig>
+  if (profile['external-controller'] === '') {
+    delete partialProfile['external-controller']
+    delete partialProfile['external-ui']
+    delete partialProfile['external-ui-url']
+    delete partialProfile['external-controller-cors']
+  } else if (profile['external-ui'] === '') {
+    delete partialProfile['external-ui']
+    delete partialProfile['external-ui-url']
   }
-  await writeFile(
-    diffWorkDir ? mihomoWorkConfigPath(current) : mihomoWorkConfigPath('work'),
-    runtimeConfigStr
+  const nextRuntimeConfigStr = stringify(profile)
+  const coreProfile = { ...profile }
+  // 日志解析启动检测需要基础日志；预览和 Gist 保留用户的实际配置。
+  if (['info', 'debug'].includes(coreProfile['log-level']) === false) {
+    coreProfile['log-level'] = 'info'
+  }
+  const coreConfigStr = stringify(coreProfile)
+  if (diffWorkDir && options.outputPath === undefined) {
+    await prepareProfileWorkDir(profileId)
+  }
+  await atomicWriteFile(
+    options.outputPath ??
+      (diffWorkDir ? mihomoWorkConfigPath(profileId) : mihomoWorkConfigPath('work')),
+    coreConfigStr
   )
-  return current
+  if (options.updateRuntimeConfig !== false) {
+    runtimeConfig = profile
+    runtimeConfigStr = nextRuntimeConfigStr
+  }
+  return { profileId, dnsGuard }
 }
 
 async function applyRuleOverride(
@@ -271,17 +330,22 @@ async function prepareProfileWorkDir(current: string | undefined): Promise<void>
     copy('geoip.metadb'),
     copy('geoip.dat'),
     copy('geosite.dat'),
-    copy('ASN.mmdb')
+    copy('ASN.mmdb'),
+    copy('BundleMRS.7z'),
+    copy('Model.bin')
   ])
 }
 
-async function getOrderedOverrideIds(current: string | undefined): Promise<{
+async function getOrderedOverrideIds(
+  current: string | undefined,
+  profileOverrideIds?: string[],
+  globalOverrideIds?: string[]
+): Promise<{
   normal: string[]
   smart: string[]
 }> {
-  const { items = [] } = (await getOverrideConfig()) || {}
-  const globalOverride = items.filter((item) => item.global).map((item) => item.id)
-  const { override = [] } = (await getProfileItem(current)) || {}
+  const globalOverride = globalOverrideIds ?? (await globalOverrideIdsNow())
+  const override = profileOverrideIds ?? (await getProfileItem(current))?.override ?? []
   const orderedOverrideIds = [...new Set(globalOverride.concat(override))]
 
   return {

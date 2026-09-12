@@ -1,6 +1,6 @@
 import path from 'path'
 import v8 from 'v8'
-import { readFile, writeFile } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import { app, ipcMain } from 'electron'
 import i18next from 'i18next'
 import {
@@ -91,6 +91,7 @@ import {
   setupFirewall
 } from '../sys/misc'
 import { getRuntimeConfig, getRuntimeConfigStr } from '../core/factory'
+import { setControlDns, takeDnsOverrideAutoDisabledNotice } from '../core/dnsOverrideGuard'
 import {
   listWebdavBackups,
   webdavBackup,
@@ -128,15 +129,24 @@ import {
   installPlugin,
   loginPlugin,
   removePlugin,
-  updatePluginProfile
+  updatePluginProfile,
+  patchPluginItem
 } from '../resolve/plugin'
 import { getPluginConfig } from '../config/plugin'
+import {
+  clearTrafficUsage,
+  importTrafficUsage,
+  queryTrafficUsageBreakdown,
+  queryTrafficUsageOverview
+} from '../traffic/database'
 import { getImageDataURL } from './image'
 import { get as httpGet } from './chromeRequest'
 import { getIconDataURL } from './icon'
 import { getAppName } from './appName'
 import { logDir, rulePath } from './dirs'
 import { installMihomoCore, getGitHubTags, clearVersionCache } from './github'
+import { atomicWriteFile } from './safeFile'
+import { startSubStoreServices } from './init'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AsyncFn = (...args: any[]) => Promise<any>
@@ -188,7 +198,7 @@ async function getRuleStr(id: string): Promise<string> {
 }
 
 async function setRuleStr(id: string, str: string): Promise<void> {
-  await writeFile(rulePath(id), str, 'utf-8')
+  await atomicWriteFile(rulePath(id), str, { encoding: 'utf8' })
 }
 
 async function getSmartOverrideContent(): Promise<string | null> {
@@ -233,6 +243,10 @@ const asyncHandlers: Record<string, AsyncFn> = {
   mihomoCloseAllConnections,
   mihomoRules,
   mihomoRulesDisable,
+  queryTrafficUsageOverview,
+  queryTrafficUsageBreakdown,
+  importTrafficUsage,
+  clearTrafficUsage,
   mihomoProxies,
   mihomoGroups,
   mihomoProxyProviders,
@@ -258,6 +272,8 @@ const asyncHandlers: Record<string, AsyncFn> = {
   patchAppConfig,
   getControledMihomoConfig,
   patchControledMihomoConfig,
+  setControlDns,
+  takeDnsOverrideAutoDisabledNotice,
   // Profile
   getProfileConfig,
   setProfileConfig,
@@ -329,6 +345,7 @@ const asyncHandlers: Record<string, AsyncFn> = {
   stopSubStoreFrontendServer,
   startSubStoreBackendServer,
   stopSubStoreBackendServer,
+  ensureSubStoreServices: startSubStoreServices,
   downloadSubStore,
   subStoreSubs,
   subStoreCollections,
@@ -354,6 +371,7 @@ const asyncHandlers: Record<string, AsyncFn> = {
   loginPlugin,
   removePlugin,
   updatePluginProfile,
+  patchPluginItem,
   // Misc
   getGistUrl,
   generateGistAgeKeyPair,

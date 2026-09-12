@@ -1,4 +1,11 @@
 import { TitleBarOverlayOptions } from 'electron'
+import type {
+  TrafficUsageAggregate,
+  TrafficUsageBreakdownQuery,
+  TrafficUsageDimension,
+  TrafficUsageImportBatch,
+  TrafficUsageOverview
+} from '../../../shared/trafficUsage'
 
 function checkIpcError<T>(response: unknown): T {
   if (response && typeof response === 'object' && 'invokeError' in response) {
@@ -21,7 +28,7 @@ interface IpcApi {
   mihomoRules: () => Promise<IMihomoRulesInfo>
   mihomoRulesDisable: (rules: Record<string, boolean>) => Promise<void>
   mihomoProxies: () => Promise<IMihomoProxies>
-  mihomoGroups: () => Promise<IMihomoMixedGroup[]>
+  mihomoGroups: (includeHidden?: boolean) => Promise<IMihomoMixedGroup[]>
   mihomoProxyProviders: () => Promise<IMihomoProxyProviders>
   mihomoUpdateProxyProviders: (name: string) => Promise<void>
   mihomoRuleProviders: () => Promise<IMihomoRuleProviders>
@@ -36,6 +43,17 @@ interface IpcApi {
   patchMihomoConfig: (patch: Partial<IMihomoConfig>) => Promise<void>
   mihomoSmartGroupWeights: (groupName: string) => Promise<Record<string, number>>
   mihomoSmartFlushCache: (configName?: string) => Promise<void>
+  queryTrafficUsageOverview: (
+    type: TrafficUsageDimension,
+    startTime: number,
+    endTime: number,
+    bucketSizeMs: number
+  ) => Promise<TrafficUsageOverview>
+  queryTrafficUsageBreakdown: (
+    query: TrafficUsageBreakdownQuery
+  ) => Promise<TrafficUsageAggregate[]>
+  importTrafficUsage: (batch: TrafficUsageImportBatch) => Promise<void>
+  clearTrafficUsage: () => Promise<void>
   getSmartOverrideContent: () => Promise<string | null>
   // AutoRun
   checkAutoRun: () => Promise<boolean>
@@ -44,6 +62,8 @@ interface IpcApi {
   // Config
   getAppConfig: (force?: boolean) => Promise<IAppConfig>
   patchAppConfig: (patch: Partial<IAppConfig>) => Promise<void>
+  setControlDns: (enabled: boolean, confirmation?: string) => Promise<IControlDnsApplyResult>
+  takeDnsOverrideAutoDisabledNotice: () => Promise<boolean>
   getControledMihomoConfig: (force?: boolean) => Promise<Partial<IMihomoConfig>>
   patchControledMihomoConfig: (patch: Partial<IMihomoConfig>) => Promise<void>
   resetAppConfig: () => Promise<void>
@@ -125,6 +145,10 @@ interface IpcApi {
   stopSubStoreFrontendServer: () => Promise<void>
   startSubStoreBackendServer: () => Promise<void>
   stopSubStoreBackendServer: () => Promise<void>
+  ensureSubStoreServices: () => Promise<{
+    backendPort?: number
+    frontendPort?: number
+  }>
   downloadSubStore: () => Promise<void>
   subStorePort: () => Promise<number>
   subStoreFrontendPort: () => Promise<number>
@@ -160,6 +184,7 @@ interface IpcApi {
   loginPlugin: (id: string) => Promise<void>
   removePlugin: (id: string) => Promise<void>
   updatePluginProfile: (id: string, force?: boolean) => Promise<void>
+  patchPluginItem: (id: string, patch: Partial<IPluginItem>) => Promise<void>
   // Misc
   getGistUrl: () => Promise<string>
   generateGistAgeKeyPair: () => Promise<{ secretKey: string; recipient: string }>
@@ -203,6 +228,10 @@ export const {
   patchMihomoConfig,
   mihomoSmartGroupWeights,
   mihomoSmartFlushCache,
+  queryTrafficUsageOverview,
+  queryTrafficUsageBreakdown,
+  importTrafficUsage,
+  clearTrafficUsage,
   getSmartOverrideContent,
   // AutoRun
   checkAutoRun,
@@ -211,6 +240,8 @@ export const {
   // Config
   getAppConfig,
   patchAppConfig,
+  setControlDns,
+  takeDnsOverrideAutoDisabledNotice,
   getControledMihomoConfig,
   patchControledMihomoConfig,
   resetAppConfig,
@@ -289,6 +320,7 @@ export const {
   stopSubStoreFrontendServer,
   startSubStoreBackendServer,
   stopSubStoreBackendServer,
+  ensureSubStoreServices,
   downloadSubStore,
   subStorePort,
   subStoreFrontendPort,
@@ -324,6 +356,7 @@ export const {
   loginPlugin,
   removePlugin,
   updatePluginProfile,
+  patchPluginItem,
   // Misc
   getGistUrl,
   generateGistAgeKeyPair,

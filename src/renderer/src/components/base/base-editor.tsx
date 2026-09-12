@@ -89,6 +89,7 @@ export const BaseEditor: React.FC<Props> = (props) => {
   const { value, readOnly = false, language, onChange } = props
 
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor>(undefined)
+  const modelRef = useRef<monaco.editor.ITextModel>(undefined)
 
   const editorWillMount = (): void => {
     monacoInitialization()
@@ -99,6 +100,7 @@ export const BaseEditor: React.FC<Props> = (props) => {
 
     const uri = monaco.Uri.parse(`${nanoid()}.${language === 'yaml' ? 'clash' : ''}.${language}`)
     const model = monaco.editor.createModel(value, language, uri)
+    modelRef.current = model
     editorRef.current?.setModel(model)
   }
 
@@ -112,6 +114,8 @@ export const BaseEditor: React.FC<Props> = (props) => {
       window.onresize = null
       editorRef.current?.dispose()
       editorRef.current = undefined
+      modelRef.current?.dispose()
+      modelRef.current = undefined
     }
   }, [])
 
@@ -140,7 +144,6 @@ export const BaseEditor: React.FC<Props> = (props) => {
       }}
       editorWillMount={editorWillMount}
       editorDidMount={editorDidMount}
-      editorWillUnmount={(): void => {}}
       onChange={onChange}
     />
   )

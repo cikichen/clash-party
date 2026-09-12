@@ -15,6 +15,8 @@ files:
   - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+asarUnpack:
+  - 'node_modules/file-icon/file-icon'
 extraResources:
   - from: './extra/'
     to: ''
@@ -23,6 +25,12 @@ protocols:
   schemes:
     - 'clash'
     - 'mihomo'
+fileAssociations:
+  - ext: 'cpx'
+    name: 'Clash Party Plugin'
+    description: 'Clash Party airport plugin descriptor'
+    mimeType: 'application/x-clash-party-plugin'
+    role: 'Viewer'
 win:
   target:
     - nsis
@@ -38,6 +46,9 @@ nsis:
 mac:
   target:
     - pkg
+  extraResources:
+    - from: './build/pkg-scripts/party.mihomo.helper.plist'
+      to: 'files/party.mihomo.helper.plist'
   entitlementsInherit: build/entitlements.mac.plist
   hardenedRuntime: true
   gatekeeperAssess: false
@@ -70,17 +81,42 @@ linux:
   target:
     - deb
     - rpm
+    - pacman
   maintainer: mihomo-party-org
   category: Utility
   artifactName: clash-party-linux-${version}-${arch}.${ext}
 deb:
   afterInstall: 'build/linux/postinst'
   afterRemove: 'build/linux/postuninst'
+  fpm:
+    - --depends
+    - wl-clipboard
 rpm:
   afterInstall: 'build/linux/postinst'
   afterRemove: 'build/linux/postuninst'
   fpm:
+    - --depends
+    - wl-clipboard
     - '--rpm-rpmbuild-define'
     - '_build_id_links none'
+pacman:
+  afterInstall: 'build/linux/postinst'
+  afterRemove: 'build/linux/postuninst'
+  fpm:
+    - --pacman-compression
+    - zstd
+  depends:
+    - alsa-lib
+    - gtk3
+    - libnotify
+    - nss
+    - libxss
+    - libxtst
+    - xdg-utils
+    - at-spi2-core
+    - util-linux-libs
+    - libsecret
+    - wl-clipboard
+  artifactName: clash-party-linux-${version}-${arch}.pkg.tar.zst
 npmRebuild: true
 publish: []

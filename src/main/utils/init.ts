@@ -1,4 +1,4 @@
-import { mkdir, writeFile, rm, readdir, cp, stat, rename } from 'fs/promises'
+import { mkdir, rm, readdir, cp, stat, rename } from 'fs/promises'
 import { existsSync } from 'fs'
 import { exec, execFile } from 'child_process'
 import { promisify } from 'util'
@@ -7,7 +7,9 @@ import { app, dialog } from 'electron'
 import {
   startPacServer,
   startSubStoreBackendServer,
-  startSubStoreFrontendServer
+  startSubStoreFrontendServer,
+  subStorePort,
+  subStoreFrontendPort
 } from '../resolve/server'
 import { triggerSysProxy } from '../sys/sysproxy'
 import {
@@ -49,11 +51,19 @@ import {
   themesDir
 } from './dirs'
 import { initLogger } from './logger'
+import { atomicWriteFile } from './safeFile'
 
 let isInitBasicCompleted = false
 let isRuntimeFilesCompleted = false
 let initBasicPromise: Promise<void> | null = null
 let runtimeFilesPromise: Promise<void> | null = null
+let subStoreServicesPromise: Promise<SubStoreServicePorts> | null = null
+let subStoreServicesStarted = false
+
+interface SubStoreServicePorts {
+  backendPort?: number
+  frontendPort?: number
+}
 
 export function safeShowErrorBox(titleKey: string, message: string): void {
   let title: string
@@ -140,7 +150,7 @@ async function initConfig(): Promise<void> {
   await Promise.all(
     configs.map(async (config) => {
       if (!existsSync(config.path)) {
-        await writeFile(config.path, stringify(config.content))
+        await atomicWriteFile(config.path, stringify(config.content))
       }
     })
   )
@@ -237,6 +247,10 @@ async function initFiles(): Promise<void> {
     },
     {
       name: 'ASN.mmdb',
+      targetDirs: [mihomoWorkDir(), mihomoTestDir()]
+    },
+    {
+      name: 'BundleMRS.7z',
       targetDirs: [mihomoWorkDir(), mihomoTestDir()]
     },
     {
@@ -472,7 +486,25 @@ export async function init(): Promise<void> {
   initDeeplink()
 }
 
-export async function startSubStoreServices(): Promise<void> {
-  await ensureRuntimeFiles()
-  await Promise.all([startSubStoreFrontendServer(), startSubStoreBackendServer()])
+export async function startSubStoreServices(): Promise<SubStoreServicePorts> {
+  if (subStoreServicesStarted) {
+    return { backendPort: subStorePort, frontendPort: subStoreFrontendPort }
+  }
+  if (subStoreServicesPromise) return subStoreServicesPromise
+
+  subStoreServicesPromise = (async () => {
+    await ensureRuntimeFiles()
+    await Promise.all([startSubStoreFrontendServer(), startSubStoreBackendServer()])
+    subStoreServicesStarted = true
+    return {
+      backendPort: subStorePort,
+      frontendPort: subStoreFrontendPort
+    }
+  })()
+
+  try {
+    return await subStoreServicesPromise
+  } finally {
+    subStoreServicesPromise = null
+  }
 }

@@ -1,14 +1,14 @@
 import { join } from 'path'
-import { readFileSync, writeFileSync } from 'fs'
-import { BrowserWindow, Menu, screen, shell } from 'electron'
+import { readFileSync } from 'fs'
+import { BrowserWindow, Menu, screen, shell, type IpcMainEvent } from 'electron'
 import { is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { getAppConfig } from './config'
-import { quitWithoutCore, stopCore } from './core/manager'
-import { triggerSysProxy } from './sys/sysproxy'
+import { quitWithoutCore } from './core/manager'
 import { hideDockIcon, showDockIcon } from './resolve/tray'
 import { dataDir } from './utils/dirs'
 import { mainWindowLogger } from './utils/logger'
+import { atomicWriteFileSync } from './utils/safeFile'
 
 interface WindowState {
   width: number
@@ -76,9 +76,9 @@ function updateWindowState(window: BrowserWindow, trackBounds = true): void {
 
 function persistWindowState(): void {
   try {
-    writeFileSync(windowStateFile(), JSON.stringify(windowState))
-  } catch {
-    // 忽略
+    atomicWriteFileSync(windowStateFile(), JSON.stringify(windowState))
+  } catch (error) {
+    void mainWindowLogger.error('Failed to persist window state', error)
   }
 }
 
@@ -103,6 +103,31 @@ function ensureVisibleOnScreen(state: WindowState): WindowState {
 export let mainWindow: BrowserWindow | null = null
 let quitTimeout: NodeJS.Timeout | null = null
 let createWindowPromise: Promise<void> | null = null
+let initialRendererReady = false
+
+// 窗口在 renderer 首屏内容（路由 + 侧边栏）就绪后再显示，避免 lazy chunk 未加载完就展示空白主区。
+function waitForInitialContent(window: BrowserWindow): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  const { webContents } = window
+  let finished = false
+  const finish = (): void => {
+    if (finished) return
+    finished = true
+    clearTimeout(timeout)
+    webContents.off('ipc-message', onIpcMessage)
+    window.off('closed', onClosed)
+    resolve()
+  }
+  const onIpcMessage = (_event: IpcMainEvent, channel: string): void => {
+    if (channel === 'rendererFirstContentReady') finish()
+  }
+  const onClosed = (): void => finish()
+  // 内容就绪信号的兜底超时，避免 renderer 异常时窗口永不显示。
+  const timeout = setTimeout(finish, 5000)
+  webContents.on('ipc-message', onIpcMessage)
+  window.once('closed', onClosed)
+  return promise
+}
 
 // 主窗口 renderer 崩溃自动恢复的防抖，避免崩溃循环时无限重建
 const MAIN_WINDOW_CRASH_WINDOW = 60 * 1000
@@ -114,10 +139,37 @@ export async function createWindow(): Promise<void> {
   if (mainWindow && !mainWindow.isDestroyed()) return
   if (createWindowPromise) return createWindowPromise
 
-  createWindowPromise = createWindowInternal().finally(() => {
+  createWindowPromise = createWindowWithRecovery().finally(() => {
     createWindowPromise = null
   })
   return createWindowPromise
+}
+
+export function markInitialRendererReady(): void {
+  initialRendererReady = true
+}
+
+async function createWindowWithRecovery(): Promise<void> {
+  const maxCreateAttempts = 3
+  for (let attempt = 1; attempt <= maxCreateAttempts; attempt++) {
+    try {
+      await createWindowInternal()
+      return
+    } catch (error) {
+      const crashRecoveryExhausted =
+        mainWindowCrashTimestamps.length > MAIN_WINDOW_MAX_CRASH_RECOVERIES
+      if (attempt === maxCreateAttempts || crashRecoveryExhausted) throw error
+
+      const failedWindow = mainWindow
+      mainWindow = null
+      if (failedWindow && !failedWindow.isDestroyed()) failedWindow.destroy()
+      await mainWindowLogger.warn(
+        `Main window creation failed (attempt ${attempt}/${maxCreateAttempts}), recreating`,
+        error
+      )
+      await new Promise((resolve) => setTimeout(resolve, attempt * 250))
+    }
+  }
 }
 
 async function createWindowInternal(): Promise<void> {
@@ -147,7 +199,7 @@ async function createWindowInternal(): Promise<void> {
     titleBarOverlay: useWindowFrame
       ? false
       : {
-          height: 49
+          height: 47
         },
     autoHideMenuBar: true,
     // Win 显式指定 icon，避免异常/恢复路径下任务栏与窗口图标依赖默认 exe
@@ -164,52 +216,41 @@ async function createWindowInternal(): Promise<void> {
     mainWindow.maximize()
   }
 
-  setupWindowEvents(mainWindow, {
-    silentStart,
-    autoQuitWithoutCore,
-    autoQuitWithoutCoreDelay,
-    autoQuitWithoutCoreMode
-  })
+  setupWindowEvents(mainWindow)
 
   if (is.dev) {
     mainWindow.webContents.openDevTools()
   }
 
+  const initialContentPromise = waitForInitialContent(mainWindow)
+
+  // 加载失败自动重试；createWindow 不再 await load，避免阻塞内容就绪门控
+  mainWindow.webContents.on('did-fail-load', () => {
+    mainWindow?.webContents.reload()
+  })
+
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    void mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+
+  await initialContentPromise
+  if (!mainWindow || mainWindow.isDestroyed()) return
+
+  if (autoQuitWithoutCore && !mainWindow.isVisible()) {
+    scheduleQuitWithoutCore(autoQuitWithoutCoreDelay, autoQuitWithoutCoreMode)
+  }
+
+  // 开发模式下始终显示窗口
+  if (!silentStart || is.dev) {
+    clearQuitTimeout()
+    mainWindow.show()
+    mainWindow.focusOnWebView()
   }
 }
 
-interface WindowConfig {
-  silentStart: boolean
-  autoQuitWithoutCore: boolean
-  autoQuitWithoutCoreDelay: number
-  autoQuitWithoutCoreMode: AutoQuitWithoutCoreMode
-}
-
-function setupWindowEvents(window: BrowserWindow, config: WindowConfig): void {
-  const { silentStart, autoQuitWithoutCore, autoQuitWithoutCoreDelay, autoQuitWithoutCoreMode } =
-    config
-
-  window.on('ready-to-show', () => {
-    if (autoQuitWithoutCore && !window.isVisible()) {
-      scheduleQuitWithoutCore(autoQuitWithoutCoreDelay, autoQuitWithoutCoreMode)
-    }
-
-    // 开发模式下始终显示窗口
-    if (!silentStart || is.dev) {
-      clearQuitTimeout()
-      window.show()
-      window.focusOnWebView()
-    }
-  })
-
-  window.webContents.on('did-fail-load', () => {
-    window.webContents.reload()
-  })
-
+function setupWindowEvents(window: BrowserWindow): void {
   // renderer 崩溃时外壳仍在（isDestroyed() 为 false）、did-fail-load 不触发，会白屏；销毁并按需重建
   window.webContents.on('render-process-gone', (_event, details) => {
     mainWindowLogger.error('Main window render process gone', details.reason).catch(() => {})
@@ -237,12 +278,16 @@ function setupWindowEvents(window: BrowserWindow, config: WindowConfig): void {
     }
 
     // 可见时立即重建，否则留待下次 showMainWindow()，避免后台崩溃突然弹窗
-    if (wasVisible) {
-      void createWindow().then(() => {
-        clearQuitTimeout()
-        mainWindow?.show()
-        mainWindow?.focusOnWebView()
-      })
+    if (wasVisible || !initialRendererReady) {
+      void createWindow()
+        .then(() => {
+          if (wasVisible) {
+            clearQuitTimeout()
+            mainWindow?.show()
+            mainWindow?.focusOnWebView()
+          }
+        })
+        .catch((error) => mainWindowLogger.error('Failed to recover main window', error))
     }
   })
 
@@ -287,12 +332,6 @@ function setupWindowEvents(window: BrowserWindow, config: WindowConfig): void {
   window.on('move', () => updateWindowState(window))
   window.on('maximize', () => updateWindowState(window, false))
   window.on('unmaximize', () => updateWindowState(window, false))
-
-  window.on('session-end', async () => {
-    saveWindowState(window)
-    await triggerSysProxy(false)
-    await stopCore()
-  })
 
   window.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)

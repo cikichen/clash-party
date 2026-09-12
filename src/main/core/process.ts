@@ -159,13 +159,55 @@ export async function waitForCoreReady(): Promise<void> {
       }
 
       if (i === CORE_READY_MAX_RETRIES - 1) {
-        managerLogger.warn(
-          `Core not ready after ${CORE_READY_MAX_RETRIES} attempts, proceeding anyway`
+        throw new Error(
+          `Core not ready after ${CORE_READY_MAX_RETRIES} attempts (${CORE_READY_MAX_RETRIES * CORE_READY_RETRY_INTERVAL_MS}ms)`
         )
-        return
       }
 
       await new Promise((resolve) => setTimeout(resolve, CORE_READY_RETRY_INTERVAL_MS))
     }
+  }
+}
+
+function normalizeProcessName(name: string): string {
+  return name
+    .trim()
+    .replace(/\.exe$/i, '')
+    .toLowerCase()
+}
+
+export async function verifyProcessOwner(
+  pid: number,
+  expectedNames: readonly string[]
+): Promise<boolean> {
+  try {
+    process.kill(pid, 0)
+  } catch {
+    return false
+  }
+
+  try {
+    let processName = ''
+    if (process.platform === 'win32') {
+      const { stdout } = await execFilePromise(
+        'tasklist',
+        ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
+        { windowsHide: true, timeout: 1000 }
+      )
+      const match = stdout.match(/^"([^"]+)","(\d+)"/m)
+      if (!match || parseInt(match[2], 10) !== pid) return false
+      processName = match[1]
+    } else {
+      const nameField = process.platform === 'darwin' ? 'ucomm=' : 'comm='
+      const { stdout } = await execFilePromise('ps', ['-p', `${pid}`, '-o', nameField], {
+        timeout: 1000
+      })
+      processName = stdout.trim().split(/\r?\n/, 1)[0] || ''
+    }
+
+    const normalizedName = normalizeProcessName(processName)
+    return expectedNames.some((name) => normalizeProcessName(name) === normalizedName)
+  } catch {
+    return false
   }
 }

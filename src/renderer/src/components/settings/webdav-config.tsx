@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from '@renderer/components/base/toast'
 import { Button, Input, Select, SelectItem, Switch } from '@heroui/react'
 import { listWebdavBackups, webdavBackup, reinitWebdavBackupScheduler } from '@renderer/utils/ipc'
@@ -36,26 +36,34 @@ const WebdavConfig: React.FC = () => {
     webdavBackupCron,
     webdavIgnoreCert
   })
-  const setWebdavDebounce = debounce(
-    ({
-      webdavUrl,
-      webdavUsername,
-      webdavPassword,
-      webdavDir,
-      webdavMaxBackups,
-      webdavBackupCron
-    }) => {
-      patchAppConfig({
-        webdavUrl,
-        webdavUsername,
-        webdavPassword,
-        webdavDir,
-        webdavMaxBackups,
-        webdavBackupCron
-      })
-    },
-    500
+  const patchAppConfigRef = useRef(patchAppConfig)
+  patchAppConfigRef.current = patchAppConfig
+  const setWebdavDebounce = useMemo(
+    () =>
+      debounce(
+        ({
+          webdavUrl,
+          webdavUsername,
+          webdavPassword,
+          webdavDir,
+          webdavMaxBackups,
+          webdavBackupCron
+        }: typeof webdav) => {
+          patchAppConfigRef.current({
+            webdavUrl,
+            webdavUsername,
+            webdavPassword,
+            webdavDir,
+            webdavMaxBackups,
+            webdavBackupCron
+          })
+        },
+        500
+      ),
+    []
   )
+  useEffect(() => () => setWebdavDebounce.cancel(), [setWebdavDebounce])
+
   const handleBackup = async (): Promise<void> => {
     setBackuping(true)
     try {
@@ -136,7 +144,7 @@ const WebdavConfig: React.FC = () => {
         <SettingItem title={t('webdav.maxBackups')} divider>
           <Select
             classNames={{ trigger: 'data-[hover=true]:bg-default-200' }}
-            className="w-[150px]"
+            className="w-37.5"
             size="sm"
             selectedKeys={new Set([webdav.webdavMaxBackups.toString()])}
             aria-label={t('webdav.maxBackups')}

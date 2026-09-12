@@ -1,22 +1,26 @@
 import { Navigate } from 'react-router-dom'
-import NetworkPage from '@renderer/pages/network'
-import Override from '@renderer/pages/override'
-import Proxies from '@renderer/pages/proxies'
-import Rules from '@renderer/pages/rules'
-import Settings from '@renderer/pages/settings'
-import Profiles from '@renderer/pages/profiles'
-import Logs from '@renderer/pages/logs'
-import Connections from '@renderer/pages/connections'
-import Mihomo from '@renderer/pages/mihomo'
-import Sysproxy from '@renderer/pages/sysproxy'
-import Tun from '@renderer/pages/tun'
-import Resources from '@renderer/pages/resources'
-import DNS from '@renderer/pages/dns'
-import Sniffer from '@renderer/pages/sniffer'
-import SubStore from '@renderer/pages/substore'
-import Traffic from '@renderer/pages/traffic'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { getSiderCardRoute } from '@renderer/utils/sider'
+import {
+  Connections,
+  DNS,
+  Logs,
+  Mihomo,
+  NetworkPageComponent,
+  Override,
+  Profiles,
+  Proxies,
+  Resources,
+  Rules,
+  Settings,
+  Sniffer,
+  SubStore,
+  Sysproxy,
+  Traffic,
+  Tun
+} from './route-pages'
+
+export { useDeferredRoutePreload } from './route-pages'
 
 const HomeRedirect: React.FC = () => {
   const { appConfig } = useAppConfig()
@@ -29,7 +33,7 @@ const HomeRedirect: React.FC = () => {
 const routes = [
   {
     path: '/network',
-    element: <NetworkPage />
+    element: <NetworkPageComponent />
   },
   {
     path: '/mihomo',

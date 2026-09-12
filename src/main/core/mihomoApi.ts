@@ -1,15 +1,18 @@
 import { createConnection } from 'net'
 import axios, { AxiosInstance } from 'axios'
 import WebSocket from 'ws'
-import { getAppConfig, getControledMihomoConfig } from '../config'
+import { app } from 'electron'
+import { getAppConfig, getControledMihomoConfig, manageSmartOverride } from '../config'
 import { mainWindow } from '../window'
 import { tray } from '../resolve/tray'
 import { calcTraffic } from '../utils/calc'
 import { floatingWindow } from '../resolve/floatingWindow'
+import { recordTrafficUsage } from '../traffic/recorder'
 import { createLogger } from '../utils/logger'
 import { mihomoWorkConfigPath } from '../utils/dirs'
 import { generateProfile, getRuntimeConfig } from './factory'
-import { getMihomoIpcPath } from './manager'
+import { syncControlDnsAfterApply } from './dnsOverrideGuard'
+import { getMihomoIpcPath, hasCoreProcess, restartCore } from './manager'
 
 const mihomoApiLogger = createLogger('MihomoApi')
 
@@ -205,8 +208,27 @@ export async function mihomoVersion(): Promise<IMihomoVersion> {
 }
 
 export const patchMihomoConfig = async (patch: Partial<IMihomoConfig>): Promise<void> => {
-  const instance = await getAxios()
-  return await instance.patch('/configs', patch)
+  const patchConfig = async (): Promise<void> => {
+    const instance = await getAxios()
+    await instance.patch('/configs', patch)
+  }
+
+  // Configuration patches can also be the first recovery action after startup
+  // failed. Do not start the core during pre-ready migrations.
+  if (!hasCoreProcess() && app.isReady()) {
+    mihomoApiLogger.warn('Core is not running, restarting core before config patch')
+    await restartCore()
+  }
+
+  try {
+    await patchConfig()
+  } catch (error) {
+    if (hasCoreProcess() || !app.isReady()) throw error
+
+    mihomoApiLogger.warn('Core exited before config patch completed, restarting core', error)
+    await restartCore()
+    await patchConfig()
+  }
 }
 
 export const mihomoCloseConnection = async (id: string): Promise<void> => {
@@ -274,7 +296,7 @@ async function resolveProviderProxies(
   return providerProxies
 }
 
-export const mihomoGroups = async (): Promise<IMihomoMixedGroup[]> => {
+export const mihomoGroups = async (includeHidden = false): Promise<IMihomoMixedGroup[]> => {
   const { mode = 'rule' } = await getControledMihomoConfig()
   if (mode === 'direct') return []
   const [proxies, runtime] = await Promise.all([mihomoProxies(), getRuntimeConfig()])
@@ -282,14 +304,14 @@ export const mihomoGroups = async (): Promise<IMihomoMixedGroup[]> => {
 
   runtime?.['proxy-groups']?.forEach((group: { name: string; url?: string; use?: string[] }) => {
     const proxy = proxies.proxies[group.name]
-    if (isMihomoGroup(proxy) && !proxy.hidden) {
+    if (isMihomoGroup(proxy) && (includeHidden || !proxy.hidden)) {
       rawGroups.push({ group: { ...proxy, testUrl: group.url }, providers: group.use || [] })
     }
   })
 
   if (!rawGroups.find(({ group }) => group.name === 'GLOBAL')) {
     const global = proxies.proxies['GLOBAL']
-    if (isMihomoGroup(global) && !global.hidden) {
+    if (isMihomoGroup(global) && (includeHidden || !global.hidden)) {
       rawGroups.push({ group: global, providers: [] })
     }
   }
@@ -409,13 +431,33 @@ export const mihomoUpgradeUI = async (): Promise<void> => {
 
 export const mihomoHotReloadConfig = async (): Promise<void> => {
   mihomoApiLogger.info('mihomoHotReloadConfig called')
-  const current = await generateProfile()
+  if (!hasCoreProcess()) {
+    mihomoApiLogger.warn('Core is not running, restarting core instead of hot reload')
+    await restartCore()
+    return
+  }
+  // Smart 覆写脚本由应用配置生成，必须先同步再生成配置，
+  // 否则界面上改动的 Smart 选项会沿用旧脚本，要等到下次重启内核才生效
+  await manageSmartOverride()
+  const { profileId: current, dnsGuard } = await generateProfile()
   const { diffWorkDir = false } = await getAppConfig()
   const configPath = diffWorkDir ? mihomoWorkConfigPath(current) : mihomoWorkConfigPath('work')
   mihomoApiLogger.info(`hot reload config path: ${configPath}`)
   const instance = await getAxios()
-  await instance.put('/configs?force=true', { path: configPath })
+  try {
+    await instance.put('/configs?force=true', { path: configPath })
+  } catch (error) {
+    if (hasCoreProcess()) throw error
+    mihomoApiLogger.warn('Core exited before hot reload completed, restarting core', error)
+    await restartCore()
+    return
+  }
   mihomoApiLogger.info('hot reload config completed')
+  try {
+    await syncControlDnsAfterApply(dnsGuard)
+  } catch (error) {
+    mihomoApiLogger.warn('Failed to sync DNS override state after hot reload', error)
+  }
   try {
     const { scheduleRuntimeConfigUpload } = await import('../resolve/gistApi')
     scheduleRuntimeConfigUpload()
@@ -459,13 +501,15 @@ const mihomoTraffic = async (): Promise<void> => {
   mihomoApiLogger.info(`Creating traffic WebSocket with URL: ${wsUrl}, IPC path: ${ipcPath}`)
   trafficStream.ws = ws
 
-  ws.onmessage = async (e): Promise<void> => {
+  ws.onmessage = (e): void => {
     if (!isCurrentStream(trafficStream, generation)) return
 
     const data = e.data as string
-    const json = JSON.parse(data) as IMihomoTrafficInfo
     trafficStream.retry = MAX_RETRY
     try {
+      // JSON.parse 必须放在 try 内：内核发来非 JSON 帧时，旧实现会在 async 回调里
+      // 抛出并变成未捕获的 Promise rejection（其余三条流都已在 try 内解析）。
+      const json = JSON.parse(data) as IMihomoTrafficInfo
       mainWindow?.webContents.send('mihomoTraffic', json)
       if (process.platform !== 'linux') {
         tray?.setToolTip(
@@ -595,7 +639,11 @@ const mihomoConnections = async (): Promise<void> => {
     const data = e.data as string
     connectionsStream.retry = MAX_RETRY
     try {
-      mainWindow?.webContents.send('mihomoConnections', JSON.parse(data) as IMihomoConnectionsInfo)
+      const info = JSON.parse(data) as IMihomoConnectionsInfo
+      recordTrafficUsage(info)
+      if (__LEGACY_BUILD__ || mainWindow?.isVisible()) {
+        mainWindow?.webContents.send('mihomoConnections', info)
+      }
     } catch {
       // ignore
     }
@@ -614,7 +662,9 @@ const mihomoConnections = async (): Promise<void> => {
 
 export async function SysProxyStatus(): Promise<boolean> {
   const appConfig = await getAppConfig()
-  return appConfig.sysProxy.enable
+  // 配置缺失/损坏时 sysProxy 可能为 undefined，直接取 .enable 会抛错并连带
+  // 把托盘图标状态刷新整条链路打断（TunStatus 已经是可选链写法）。
+  return appConfig?.sysProxy?.enable === true
 }
 
 export const TunStatus = async (): Promise<boolean> => {

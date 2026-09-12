@@ -24,9 +24,15 @@ import React, {
   memo,
   useDeferredValue
 } from 'react'
-import { getProfileStr, setRuleStr, getRuleStr } from '@renderer/utils/ipc'
+import {
+  getProfileStr,
+  setRuleStr,
+  getRuleStr,
+  mihomoHotReloadConfig,
+  getProfileConfig
+} from '@renderer/utils/ipc'
 import { useTranslation } from 'react-i18next'
-import yaml from 'js-yaml'
+import { CORE_SCHEMA, dump, load, mergeTag } from 'js-yaml'
 import { Virtuoso } from 'react-virtuoso'
 import { IoMdTrash, IoMdArrowUp, IoMdArrowDown, IoMdUndo } from 'react-icons/io'
 import { MdVerticalAlignTop, MdVerticalAlignBottom } from 'react-icons/md'
@@ -71,6 +77,10 @@ interface RuleItem {
   proxy: string
   additionalParams?: string[]
   offset?: number
+}
+
+const yamlLoadOptions = {
+  schema: CORE_SCHEMA.withTags(mergeTag)
 }
 
 const toStringValue = (value: unknown): string => {
@@ -553,6 +563,8 @@ const EditRulesModal: React.FC<Props> = (props) => {
   const [prependRules, setPrependRules] = useState<Set<number>>(new Set())
   const [appendRules, setAppendRules] = useState<Set<number>>(new Set())
   const [isLoading, setIsLoading] = useState(true)
+  // 加载失败时不能让用户保存，否则会用空的覆写规则整文件覆盖掉已有配置
+  const [loadFailed, setLoadFailed] = useState(false)
   const { t } = useTranslation()
 
   const ruleIndexMap = useMemo(() => {
@@ -689,11 +701,12 @@ const EditRulesModal: React.FC<Props> = (props) => {
   useEffect(() => {
     const loadContent = async (): Promise<void> => {
       setIsLoading(true)
+      setLoadFailed(false)
       try {
         const content = await getProfileStr(id)
         setProfileContent(content)
 
-        const parsed = yaml.load(content) as Record<string, unknown> | undefined
+        const parsed = load(content, yamlLoadOptions) as Record<string, unknown> | undefined
         let initialRules: RuleItem[] = []
 
         if (parsed && parsed.rules && Array.isArray(parsed.rules)) {
@@ -746,7 +759,7 @@ const EditRulesModal: React.FC<Props> = (props) => {
 
         try {
           const ruleContent = await getRuleStr(id)
-          const ruleData = yaml.load(ruleContent) as {
+          const ruleData = load(ruleContent, yamlLoadOptions) as {
             prepend?: string[]
             append?: string[]
             delete?: string[]
@@ -837,8 +850,10 @@ const EditRulesModal: React.FC<Props> = (props) => {
           setAppendRules(new Set())
           setDeletedRules(new Set())
         }
-      } catch {
-        // 解析配置文件失败，静默处理
+      } catch (e) {
+        // 解析配置文件失败：必须让用户看到并禁止保存，不能静默当成“没有规则”
+        setLoadFailed(true)
+        toast.error(String(e))
       } finally {
         setIsLoading(false)
       }
@@ -868,6 +883,8 @@ const EditRulesModal: React.FC<Props> = (props) => {
   }, [newRule.type, newRule.payload, validateRulePayload])
 
   const handleSave = useCallback(async (): Promise<void> => {
+    // 规则尚未加载完或加载失败时，内存里的规则是空的，保存会把已有覆写清空
+    if (isLoading || loadFailed) return
     try {
       // 保存规则到文件
       const prependRuleStrings = Array.from(prependRules)
@@ -902,15 +919,21 @@ const EditRulesModal: React.FC<Props> = (props) => {
       }
 
       // 保存到 YAML 文件
-      const ruleYaml = yaml.dump(ruleData)
+      const ruleYaml = dump(ruleData)
       await setRuleStr(id, ruleYaml)
+
+      const profileConfig = await getProfileConfig()
+      if (profileConfig?.current === id) {
+        await mihomoHotReloadConfig()
+      }
+
       onClose()
     } catch (e) {
       toast.error(
         t('profiles.editRules.saveError') + ': ' + (e instanceof Error ? e.message : String(e))
       )
     }
-  }, [prependRules, deletedRules, rules, appendRules, id, onClose, t])
+  }, [prependRules, deletedRules, rules, appendRules, id, onClose, t, isLoading, loadFailed])
 
   const handleRuleTypeChange = (selected: string): void => {
     const noResolveSupported = isRuleSupportsNoResolve(selected)
@@ -1396,7 +1419,12 @@ const EditRulesModal: React.FC<Props> = (props) => {
           >
             {t('common.cancel')}
           </Button>
-          <Button size="sm" color="primary" onPress={handleSave}>
+          <Button
+            size="sm"
+            color="primary"
+            isDisabled={isLoading || loadFailed}
+            onPress={handleSave}
+          >
             {t('common.save')}
           </Button>
         </ModalFooter>

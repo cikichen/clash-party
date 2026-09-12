@@ -48,6 +48,12 @@ import TrayIconCropModal from './tray-icon-crop-modal'
 
 const rasterTrayIconPattern = /\.(png|jpe?g|webp)$/i
 const macTrayIconPattern = /\.(ico|icns)$/i
+const GITHUB_PROXY_BUILTINS = [
+  'https://gh-proxy.org',
+  'https://ghfast.top',
+  'https://down.clashparty.org',
+  'https://download.mihomo.party'
+]
 type TrayIconCropTarget = 'custom' | keyof ICustomTrayIcons
 const customTrayIconStateKeys: (keyof ICustomTrayIcons)[] = ['off', 'sysProxy', 'tun']
 
@@ -90,7 +96,9 @@ const GeneralConfig: React.FC = () => {
     autoQuitWithoutCoreMode = 'core',
     customTheme = 'default.css',
     envType = [platform === 'win32' ? 'powershell' : 'bash'],
-    autoCheckUpdate,
+    autoCheckUpdate = true,
+    autoUpdateProfileOnStart = true,
+    silentUpdate = true,
     githubProxy = 'auto',
     appTheme = 'system',
     language = 'zh-CN',
@@ -98,6 +106,22 @@ const GeneralConfig: React.FC = () => {
     hideConnectionCardWave = false,
     disableAppLog = false
   } = appConfig || {}
+
+  const isCustomGithubProxy =
+    githubProxy !== 'auto' &&
+    githubProxy !== 'direct' &&
+    !GITHUB_PROXY_BUILTINS.includes(githubProxy)
+  const [customGithubProxy, setCustomGithubProxy] = useState(isCustomGithubProxy ? githubProxy : '')
+  const patchGithubProxy = debounce(async (v: string) => {
+    await patchAppConfig({ githubProxy: v })
+  }, 500)
+
+  useEffect(() => {
+    if (isCustomGithubProxy && customGithubProxy !== githubProxy) {
+      setCustomGithubProxy(githubProxy)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [githubProxy, isCustomGithubProxy])
 
   useEffect(() => {
     resolveThemes().then((themes) => {
@@ -269,6 +293,15 @@ const GeneralConfig: React.FC = () => {
             }}
           />
         </SettingItem>
+        <SettingItem title={t('settings.autoUpdateProfileOnStart')} divider>
+          <Switch
+            size="sm"
+            isSelected={autoUpdateProfileOnStart}
+            onValueChange={(v) => {
+              patchAppConfig({ autoUpdateProfileOnStart: v })
+            }}
+          />
+        </SettingItem>
         <SettingItem title={t('settings.autoCheckUpdate')} divider>
           <Switch
             size="sm"
@@ -278,25 +311,50 @@ const GeneralConfig: React.FC = () => {
             }}
           />
         </SettingItem>
+        <SettingItem title={t('settings.silentUpdate')} divider>
+          <Switch
+            size="sm"
+            isSelected={silentUpdate}
+            onValueChange={(v) => {
+              patchAppConfig({ silentUpdate: v })
+            }}
+          />
+        </SettingItem>
         <SettingItem title={t('settings.githubProxy')} divider>
           <Select
             classNames={{ trigger: 'data-[hover=true]:bg-default-200' }}
             className="w-50"
             size="sm"
-            selectedKeys={[githubProxy]}
+            selectedKeys={[isCustomGithubProxy ? 'custom' : githubProxy]}
             aria-label={t('settings.githubProxy')}
             onSelectionChange={(v) => {
-              patchAppConfig({ githubProxy: Array.from(v)[0] as string })
+              const key = Array.from(v)[0] as string
+              patchAppConfig({ githubProxy: key === 'custom' ? customGithubProxy : key })
             }}
           >
             <SelectItem key="auto">{t('settings.githubProxy.auto')}</SelectItem>
             <SelectItem key="direct">{t('settings.githubProxy.direct')}</SelectItem>
+            <SelectItem key="custom">{t('settings.githubProxy.custom')}</SelectItem>
             <SelectItem key="https://gh-proxy.org">gh-proxy.org</SelectItem>
             <SelectItem key="https://ghfast.top">ghfast.top</SelectItem>
             <SelectItem key="https://down.clashparty.org">down.clashparty.org</SelectItem>
             <SelectItem key="https://download.mihomo.party">download.mihomo.party</SelectItem>
           </Select>
         </SettingItem>
+        {isCustomGithubProxy && (
+          <SettingItem title={t('settings.githubProxy.customAddress')} divider>
+            <Input
+              size="sm"
+              className="w-70"
+              value={customGithubProxy}
+              placeholder={t('settings.githubProxy.customPlaceholder')}
+              onValueChange={(v) => {
+                setCustomGithubProxy(v)
+                patchGithubProxy(v)
+              }}
+            />
+          </SettingItem>
+        )}
         <SettingItem title={t('settings.silentStart')} divider>
           <Switch
             size="sm"
@@ -458,20 +516,22 @@ const GeneralConfig: React.FC = () => {
             </SettingItem>
           </>
         )}
-        <SettingItem title={t('settings.disableTray')} divider>
-          <Switch
-            size="sm"
-            isSelected={disableTray}
-            onValueChange={async (v) => {
-              await patchAppConfig({ disableTray: v })
-              if (v) {
-                closeTrayIcon()
-              } else {
-                showTrayIcon()
-              }
-            }}
-          />
-        </SettingItem>
+        {showFloating && (
+          <SettingItem title={t('settings.disableTray')} divider>
+            <Switch
+              size="sm"
+              isSelected={disableTray}
+              onValueChange={async (v) => {
+                await patchAppConfig({ disableTray: v })
+                if (v) {
+                  closeTrayIcon()
+                } else {
+                  showTrayIcon()
+                }
+              }}
+            />
+          </SettingItem>
+        )}
         {!disableTray && (
           <>
             <SettingItem title={t('settings.swapTrayClick')} divider>

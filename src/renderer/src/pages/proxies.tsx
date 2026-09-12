@@ -1,4 +1,15 @@
-import { Avatar, Button, Card, CardBody, Chip } from '@heroui/react'
+import {
+  Avatar,
+  Button,
+  Card,
+  CardBody,
+  Chip,
+  Dropdown,
+  DropdownItem,
+  DropdownMenu,
+  DropdownSection,
+  DropdownTrigger
+} from '@heroui/react'
 import BasePage from '@renderer/components/base/base-page'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import {
@@ -7,11 +18,17 @@ import {
   mihomoCloseAllConnections,
   mihomoProxyDelay
 } from '@renderer/utils/ipc'
+import { FaLocationCrosshairs } from 'react-icons/fa6'
 import { CgDetailsLess, CgDetailsMore } from 'react-icons/cg'
 import { TbCircleLetterD } from 'react-icons/tb'
-import { FaLocationCrosshairs } from 'react-icons/fa6'
 import { RxLetterCaseCapitalize } from 'react-icons/rx'
-import { MdVisibilityOff, MdDoubleArrow, MdOutlineSpeed } from 'react-icons/md'
+import {
+  MdCheck,
+  MdDoubleArrow,
+  MdFilterAlt,
+  MdOutlineSpeed,
+  MdVisibilityOff
+} from 'react-icons/md'
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { GroupedVirtuoso, GroupedVirtuosoHandle } from 'react-virtuoso'
 import ProxyItem from '@renderer/components/proxies/proxy-item'
@@ -21,8 +38,39 @@ import CollapseInput from '@renderer/components/base/collapse-input'
 import { includesIgnoreCase } from '@renderer/utils/includes'
 import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-config'
 import { useTranslation } from 'react-i18next'
+import { HiOutlineAdjustmentsHorizontal } from 'react-icons/hi2'
 
 const GROUP_EXPAND_STATE_KEY = 'proxy_group_expand_state'
+const EMPTY_GROUPS: IMihomoMixedGroup[] = []
+
+interface GroupExpandState {
+  byName: Record<string, boolean>
+  legacy?: boolean[]
+}
+
+const loadGroupExpandState = (): GroupExpandState => {
+  try {
+    const savedState = localStorage.getItem(GROUP_EXPAND_STATE_KEY)
+    if (!savedState) return { byName: {} }
+
+    const parsed: unknown = JSON.parse(savedState)
+    if (Array.isArray(parsed)) {
+      return { byName: {}, legacy: parsed.map((isOpen) => isOpen === true) }
+    }
+    if (typeof parsed === 'object' && parsed !== null) {
+      const byName: Record<string, boolean> = {}
+      Object.entries(parsed).forEach(([name, isOpen]) => {
+        if (typeof isOpen === 'boolean') {
+          byName[name] = isOpen
+        }
+      })
+      return { byName }
+    }
+  } catch (error) {
+    console.error('Failed to load group expand state:', error)
+  }
+  return { byName: {} }
+}
 
 function getProviderName(proxy: IMihomoProxy | IMihomoGroup): string | undefined {
   return 'provider-name' in proxy ? proxy['provider-name'] : undefined
@@ -30,52 +78,62 @@ function getProviderName(proxy: IMihomoProxy | IMihomoGroup): string | undefined
 
 // 自定义 hook 用于管理展开状态
 const useProxyState = (
-  groups: IMihomoMixedGroup[]
+  groups: IMihomoMixedGroup[] | undefined
 ): {
   virtuosoRef: React.RefObject<GroupedVirtuosoHandle | null>
   isOpen: boolean[]
   setIsOpen: React.Dispatch<React.SetStateAction<boolean[]>>
 } => {
   const virtuosoRef = useRef<GroupedVirtuosoHandle | null>(null)
+  const [expandState, setExpandState] = useState<GroupExpandState>(loadGroupExpandState)
 
-  // 初始化展开状态
-  const [isOpen, setIsOpen] = useState<boolean[]>(() => {
-    try {
-      const savedState = localStorage.getItem(GROUP_EXPAND_STATE_KEY)
-      if (savedState) {
-        const parsed = JSON.parse(savedState)
-        if (Array.isArray(parsed)) {
-          return parsed
-        }
-      }
-    } catch (error) {
-      console.error('Failed to load group expand state:', error)
-    }
-    return []
-  })
+  const isOpen = useMemo(
+    () =>
+      groups?.map(
+        (group, index) => expandState.byName[group.name] ?? expandState.legacy?.[index] ?? false
+      ) ?? [],
+    [groups, expandState]
+  )
 
-  // 同步展开状态数组长度与 groups 长度
+  // 旧数组格式按当前加载的分组顺序迁移一次。
   useEffect(() => {
-    if (groups.length !== isOpen.length) {
-      setIsOpen((prev) => {
-        if (groups.length > prev.length) {
-          return [...prev, ...Array(groups.length - prev.length).fill(false)]
-        }
-        return prev.slice(0, groups.length)
+    if (!groups || expandState.legacy === undefined) return
+    setExpandState((prev) => {
+      if (prev.legacy === undefined) return prev
+      const byName = { ...prev.byName }
+      groups.forEach((group, index) => {
+        byName[group.name] = prev.legacy?.[index] ?? false
       })
-    }
-  }, [groups.length, isOpen.length, setIsOpen])
+      return { byName }
+    })
+  }, [groups, expandState.legacy])
 
-  // 保存展开状态
   useEffect(() => {
-    if (isOpen.length > 0) {
-      try {
-        localStorage.setItem(GROUP_EXPAND_STATE_KEY, JSON.stringify(isOpen))
-      } catch (error) {
-        console.error('Failed to save group expand state:', error)
-      }
+    if (expandState.legacy !== undefined) return
+    try {
+      localStorage.setItem(GROUP_EXPAND_STATE_KEY, JSON.stringify(expandState.byName))
+    } catch (error) {
+      console.error('Failed to save group expand state:', error)
     }
-  }, [isOpen])
+  }, [expandState])
+
+  const setIsOpen = useCallback<React.Dispatch<React.SetStateAction<boolean[]>>>(
+    (value) => {
+      if (!groups) return
+      setExpandState((prev) => {
+        const current = groups.map(
+          (group, index) => prev.byName[group.name] ?? prev.legacy?.[index] ?? false
+        )
+        const next = typeof value === 'function' ? value(current) : value
+        const byName = { ...prev.byName }
+        groups.forEach((group, index) => {
+          byName[group.name] = next[index] ?? false
+        })
+        return { byName }
+      })
+    },
+    [groups]
+  )
 
   return {
     virtuosoRef,
@@ -88,7 +146,8 @@ const Proxies: React.FC = () => {
   const { t } = useTranslation()
   const { controledMihomoConfig } = useControledMihomoConfig()
   const { mode = 'rule' } = controledMihomoConfig || {}
-  const { groups = [], mutate } = useGroups()
+  const { groups: groupData, mutate, showHidden, setShowHidden } = useGroups()
+  const groups = groupData ?? EMPTY_GROUPS
   const { appConfig, patchAppConfig } = useAppConfig()
   const {
     proxyDisplayMode = 'simple',
@@ -99,7 +158,7 @@ const Proxies: React.FC = () => {
   } = appConfig || {}
 
   const [cols, setCols] = useState(1)
-  const { virtuosoRef, isOpen, setIsOpen } = useProxyState(groups)
+  const { virtuosoRef, isOpen, setIsOpen } = useProxyState(groupData)
   const [delaying, setDelaying] = useState<Set<string>[]>(() =>
     Array.from({ length: groups.length }, () => new Set<string>())
   )
@@ -590,69 +649,130 @@ const Proxies: React.FC = () => {
     <BasePage
       title={t('proxies.title')}
       header={
-        <>
-          <Button
-            size="sm"
-            isIconOnly
-            variant="light"
-            className="app-nodrag"
-            onPress={() => {
-              patchAppConfig({
-                hideUnavailableProxies: !appConfig?.hideUnavailableProxies
-              })
-            }}
-          >
-            <MdVisibilityOff
-              className={`text-lg ${appConfig?.hideUnavailableProxies ? 'text-warning' : 'text-foreground-500'}`}
-              title={
-                appConfig?.hideUnavailableProxies
-                  ? t('proxies.hideUnavailable.enabled')
-                  : t('proxies.hideUnavailable.disabled')
+        <Dropdown placement="bottom-end">
+          <DropdownTrigger>
+            <Button
+              size="sm"
+              isIconOnly
+              variant="light"
+              className="app-nodrag"
+              title={t('proxies.settings')}
+            >
+              <HiOutlineAdjustmentsHorizontal className="text-lg" />
+            </Button>
+          </DropdownTrigger>
+          <DropdownMenu
+            aria-label={t('proxies.settings')}
+            className="min-w-64 p-1"
+            onAction={(key) => {
+              switch (key) {
+                case 'show-hidden':
+                  setShowHidden((prev) => !prev)
+                  break
+                case 'hide-unavailable':
+                  void patchAppConfig({
+                    hideUnavailableProxies: !appConfig?.hideUnavailableProxies
+                  })
+                  break
+                case 'order-default':
+                  void patchAppConfig({ proxyDisplayOrder: 'default' })
+                  break
+                case 'order-delay':
+                  void patchAppConfig({ proxyDisplayOrder: 'delay' })
+                  break
+                case 'order-name':
+                  void patchAppConfig({ proxyDisplayOrder: 'name' })
+                  break
+                case 'mode-simple':
+                  void patchAppConfig({ proxyDisplayMode: 'simple' })
+                  break
+                case 'mode-full':
+                  void patchAppConfig({ proxyDisplayMode: 'full' })
+                  break
               }
-            />
-          </Button>
-          <Button
-            size="sm"
-            isIconOnly
-            variant="light"
-            className="app-nodrag"
-            onPress={() => {
-              patchAppConfig({
-                proxyDisplayOrder:
-                  proxyDisplayOrder === 'default'
-                    ? 'delay'
-                    : proxyDisplayOrder === 'delay'
-                      ? 'name'
-                      : 'default'
-              })
             }}
           >
-            {proxyDisplayOrder === 'default' ? (
-              <TbCircleLetterD className="text-lg" title={t('proxies.order.default')} />
-            ) : proxyDisplayOrder === 'delay' ? (
-              <MdOutlineSpeed className="text-lg" title={t('proxies.order.delay')} />
-            ) : (
-              <RxLetterCaseCapitalize className="text-lg" title={t('proxies.order.name')} />
-            )}
-          </Button>
-          <Button
-            size="sm"
-            isIconOnly
-            variant="light"
-            className="app-nodrag"
-            onPress={() => {
-              patchAppConfig({
-                proxyDisplayMode: proxyDisplayMode === 'simple' ? 'full' : 'simple'
-              })
-            }}
-          >
-            {proxyDisplayMode === 'full' ? (
-              <CgDetailsMore className="text-lg" title={t('proxies.mode.full')} />
-            ) : (
-              <CgDetailsLess className="text-lg" title={t('proxies.mode.simple')} />
-            )}
-          </Button>
-        </>
+            <DropdownSection title={t('proxies.settings.visibility')} showDivider>
+              <DropdownItem
+                key="show-hidden"
+                startContent={<MdFilterAlt className="text-lg" />}
+                endContent={showHidden ? <MdCheck className="text-lg text-primary" /> : null}
+              >
+                {t(showHidden ? 'proxies.hiddenGroups.hide' : 'proxies.hiddenGroups.show')}
+              </DropdownItem>
+              <DropdownItem
+                key="hide-unavailable"
+                startContent={<MdVisibilityOff className="text-lg" />}
+                endContent={
+                  appConfig?.hideUnavailableProxies ? (
+                    <MdCheck className="text-lg text-primary" />
+                  ) : null
+                }
+              >
+                {t(
+                  appConfig?.hideUnavailableProxies
+                    ? 'proxies.hideUnavailable.enabled'
+                    : 'proxies.hideUnavailable.disabled'
+                )}
+              </DropdownItem>
+            </DropdownSection>
+            <DropdownSection title={t('proxies.settings.order')} showDivider>
+              <DropdownItem
+                key="order-default"
+                startContent={<TbCircleLetterD className="text-lg" />}
+                endContent={
+                  proxyDisplayOrder === 'default' ? (
+                    <MdCheck className="text-lg text-primary" />
+                  ) : null
+                }
+              >
+                {t('proxies.order.default')}
+              </DropdownItem>
+              <DropdownItem
+                key="order-delay"
+                startContent={<MdOutlineSpeed className="text-lg" />}
+                endContent={
+                  proxyDisplayOrder === 'delay' ? (
+                    <MdCheck className="text-lg text-primary" />
+                  ) : null
+                }
+              >
+                {t('proxies.order.delay')}
+              </DropdownItem>
+              <DropdownItem
+                key="order-name"
+                startContent={<RxLetterCaseCapitalize className="text-lg" />}
+                endContent={
+                  proxyDisplayOrder === 'name' ? <MdCheck className="text-lg text-primary" /> : null
+                }
+              >
+                {t('proxies.order.name')}
+              </DropdownItem>
+            </DropdownSection>
+            <DropdownSection title={t('proxies.settings.mode')}>
+              <DropdownItem
+                key="mode-simple"
+                startContent={<CgDetailsLess className="text-lg" />}
+                endContent={
+                  proxyDisplayMode === 'simple' ? (
+                    <MdCheck className="text-lg text-primary" />
+                  ) : null
+                }
+              >
+                {t('proxies.mode.simple')}
+              </DropdownItem>
+              <DropdownItem
+                key="mode-full"
+                startContent={<CgDetailsMore className="text-lg" />}
+                endContent={
+                  proxyDisplayMode === 'full' ? <MdCheck className="text-lg text-primary" /> : null
+                }
+              >
+                {t('proxies.mode.full')}
+              </DropdownItem>
+            </DropdownSection>
+          </DropdownMenu>
+        </Dropdown>
       }
     >
       {mode === 'direct' ? (
@@ -664,7 +784,9 @@ const Proxies: React.FC = () => {
         </div>
       ) : (
         <div className="h-[calc(100vh-50px)]">
+          {/* Reset Virtuoso's measured sizes after toggling unavailable proxy filtering. */}
           <GroupedVirtuoso
+            key={appConfig?.hideUnavailableProxies ? 'hide-unavailable' : 'show-unavailable'}
             ref={virtuosoRef}
             groupCounts={groupCounts}
             defaultItemHeight={80}

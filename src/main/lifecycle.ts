@@ -3,9 +3,10 @@ import { promisify } from 'util'
 import { stat } from 'fs/promises'
 import { existsSync } from 'fs'
 import { app, powerMonitor } from 'electron'
-import { stopCore, cleanupCoreWatcher } from './core/manager'
+import { stopCoreForExit, cleanupCoreWatcher } from './core/manager'
 import { primeAdminPrivilegesCache } from './core/admin'
 import { triggerSysProxy, disableSysProxySync } from './sys/sysproxy'
+import { closeTrafficUsage } from './traffic/recorder'
 import { exePath } from './utils/dirs'
 import { saveMainWindowState } from './window'
 
@@ -59,26 +60,27 @@ export function setupPlatformSpecifics(): void {
 
   if (process.platform === 'win32') {
     const elevated = isWindowsElevatedSync()
-    if (elevated) {
+    if (elevated === true) {
       primeAdminPrivilegesCache(true)
       app.commandLine.appendSwitch('disable-gpu-sandbox')
     }
   }
 }
 
-function isWindowsElevatedSync(): boolean {
+function isWindowsElevatedSync(): boolean | null {
   if (process.platform !== 'win32') return false
   try {
     execFileSync('fltmc', [], { stdio: 'ignore', windowsHide: true, timeout: 800 })
     return true
   } catch {
-    return false
+    // 只有成功结果可安全缓存；所有失败交给异步 fltmc + net session 回退确认。
+    return null
   }
 }
 
 export function setupAppLifecycle(): void {
   let sysProxyDisabled = false
-  let isQuitting = false
+  let cleanupPromise: Promise<void> | null = null
 
   const withTimeout = async (promise: Promise<void>, timeout: number): Promise<void> => {
     let timeoutId: NodeJS.Timeout | null = null
@@ -95,32 +97,48 @@ export function setupAppLifecycle(): void {
     }
   }
 
-  const cleanupBeforeExit = async (): Promise<void> => {
-    if (isQuitting) return
-    isQuitting = true
+  const cleanupBeforeExit = (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise
 
-    saveMainWindowState() // 硬退出补一次落盘
+    cleanupPromise = (async () => {
+      saveMainWindowState() // 硬退出补一次落盘
 
-    cleanupCoreWatcher()
+      cleanupCoreWatcher()
 
-    if (process.platform !== 'darwin') {
-      disableSysProxySync()
-      sysProxyDisabled = true
-    }
+      if (process.platform !== 'darwin') {
+        disableSysProxySync()
+        sysProxyDisabled = true
+      }
 
-    await withTimeout(
-      Promise.allSettled([
-        triggerSysProxy(false).then(() => {
-          sysProxyDisabled = true
-        }),
-        stopCore()
-      ]).then(() => {}),
-      1200
-    )
+      const cleanupTasks: Promise<unknown>[] = [stopCoreForExit(), closeTrafficUsage()]
+      if (process.platform === 'darwin') {
+        cleanupTasks.push(
+          triggerSysProxy(false, { helperTimeout: 750, force: true }).then(() => {
+            sysProxyDisabled = true
+          })
+        )
+      }
+
+      await withTimeout(
+        Promise.allSettled(cleanupTasks).then(() => {}),
+        1200
+      )
+    })()
+
+    return cleanupPromise
   }
 
   app.on('window-all-closed', () => {
     // Keep the app and tray alive when lightweight tray mode destroys the renderer window.
+  })
+
+  // Windows 注销/关机可能先触发窗口 session-end；复用同一清理 Promise，
+  // 避免与 powerMonitor.shutdown 重复执行普通、无界的核心和代理清理。
+  app.on('browser-window-created', (_event, window) => {
+    window.on('session-end', async () => {
+      await cleanupBeforeExit()
+      app.exit()
+    })
   })
 
   app.on('before-quit', async (e) => {

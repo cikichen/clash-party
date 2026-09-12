@@ -22,7 +22,6 @@ export const defaultConfig: IAppConfig = {
   enableSmartOverride: true,
   smartCoreUseLightGBM: false,
   smartCoreCollectData: false,
-  smartCoreStrategy: 'sticky-sessions',
   silentStart: false,
   appTheme: 'system',
   useWindowFrame: false,
@@ -36,6 +35,7 @@ export const defaultConfig: IAppConfig = {
   maxLogDays: 7,
   maxLogFileSize: 10,
   disableAppLog: false,
+  disableCoreLog: false,
   proxyCols: 'auto',
   connectionDirection: 'asc',
   connectionOrderBy: 'time',
@@ -46,6 +46,8 @@ export const defaultConfig: IAppConfig = {
   proxyDisplayMode: 'simple',
   proxyDisplayOrder: 'default',
   autoCheckUpdate: true,
+  autoUpdateProfileOnStart: true,
+  silentUpdate: true,
   autoCloseConnection: true,
   subscriptionTimeout: 30000,
   gistAgeEncrypt: false,
@@ -83,6 +85,8 @@ export const defaultConfig: IAppConfig = {
 
 export const defaultControledMihomoConfig: Partial<IMihomoConfig> = {
   'external-controller': '',
+  'external-ui': '',
+  'external-ui-url': 'https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip',
   ipv6: true,
   mode: 'rule',
   'mixed-port': DEFAULT_MIHOMO_PORTS.mixed,

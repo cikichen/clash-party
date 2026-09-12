@@ -3,17 +3,16 @@ import TrafficRankings from '@renderer/components/traffic/traffic-rankings'
 import TrafficTrendChart from '@renderer/components/traffic/traffic-trend-chart'
 import TrafficDetailsTable from '@renderer/components/traffic/traffic-details-table'
 import {
-  getAggregatedData,
+  getTrafficOverview,
   getSubStatsByHost,
   getDevicesByHost,
   getProxyStatsByHost,
-  getTrafficTrend,
+  clearTrafficUsageData,
   type AggregatedData,
   type DataUsageType
 } from '@renderer/utils/dataUsage'
-import { db } from '@renderer/utils/db'
 import { Button, Tab, Tabs } from '@heroui/react'
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { calcTraffic } from '@renderer/utils/calc'
 import { CgTrash } from 'react-icons/cg'
@@ -21,6 +20,7 @@ import { CgTrash } from 'react-icons/cg'
 type TimeRange = '1h' | '24h' | '7d' | '30d'
 
 const TIME_RANGES: TimeRange[] = ['1h', '24h', '7d', '30d']
+const AUTO_REFRESH_INTERVAL_MS = 5000
 
 function getTimeRange(range: TimeRange): { start: number; end: number; bucketSizeMs: number } {
   const end = Date.now()
@@ -53,43 +53,86 @@ const TrafficPage: React.FC = () => {
   const [selectedSubRow, setSelectedSubRow] = useState<string | null>(null)
   const [totalStats, setTotalStats] = useState({ upload: 0, download: 0, total: 0, count: 0 })
   const [bucketSizeMs, setBucketSizeMs] = useState(60 * 60 * 1000)
+  const loadGenerationRef = useRef(0)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [expandingKey, setExpandingKey] = useState<string | null>(null)
+  const detailLoadIdRef = useRef(0)
 
-  const load = useCallback(async () => {
-    const { start, end, bucketSizeMs: bms } = getTimeRange(timeRange)
-    setBucketSizeMs(bms)
+  const load = useCallback(
+    async (
+      resetSelection = true,
+      generation = loadGenerationRef.current,
+      isCancelled: () => boolean = () => false
+    ) => {
+      const { start, end, bucketSizeMs: bms } = getTimeRange(timeRange)
+      const { rankings: agg, trend, totals } = await getTrafficOverview(activeView, start, end, bms)
 
-    const [agg, trend] = await Promise.all([
-      getAggregatedData(activeView, start, end),
-      getTrafficTrend(start, end, bms)
-    ])
+      if (isCancelled() || generation !== loadGenerationRef.current) return
 
-    setRankings(agg)
-    setTrendData(trend)
-    setTotalStats(
-      agg.reduce(
-        (acc, r) => ({
-          upload: acc.upload + r.upload,
-          download: acc.download + r.download,
-          total: acc.total + r.total,
-          count: acc.count + r.count
-        }),
-        { upload: 0, download: 0, total: 0, count: 0 }
-      )
-    )
+      setBucketSizeMs(bms)
+      setRankings(agg)
+      setTrendData(trend)
+      setTotalStats(totals)
 
-    setSelectedRow(null)
-    setSubStats([])
-    setProxyStatsMap({})
-    setSelectedSubRow(null)
-  }, [activeView, timeRange])
+      if (resetSelection) {
+        setSelectedRow(null)
+        setSubStats([])
+        setProxyStatsMap({})
+        setSelectedSubRow(null)
+      }
+    },
+    [activeView, timeRange]
+  )
 
   useEffect(() => {
-    load()
+    const generation = ++loadGenerationRef.current
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+    let cancelled = false
+    let refreshing = false
+    let resetSelection = true
+
+    const clearRefreshTimer = (): void => {
+      if (refreshTimer === null) return
+      clearTimeout(refreshTimer)
+      refreshTimer = null
+    }
+
+    const refresh = async (): Promise<void> => {
+      if (cancelled || document.hidden || refreshing) return
+      refreshing = true
+      try {
+        await load(resetSelection, generation, () => cancelled || document.hidden)
+      } finally {
+        refreshing = false
+      }
+      if (cancelled || document.hidden || generation !== loadGenerationRef.current) return
+      resetSelection = false
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null
+        void refresh()
+      }, AUTO_REFRESH_INTERVAL_MS)
+    }
+
+    const handleVisibilityChange = (): void => {
+      if (document.hidden) clearRefreshTimer()
+      else void refresh()
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    void refresh()
+
+    return () => {
+      cancelled = true
+      clearRefreshTimer()
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
   }, [load])
 
   const handleSelectRow = useCallback(
     async (label: string) => {
       if (selectedRow === label) {
+        detailLoadIdRef.current += 1
+        setDetailLoading(false)
         setSelectedRow(null)
         setSubStats([])
         setProxyStatsMap({})
@@ -99,15 +142,23 @@ const TrafficPage: React.FC = () => {
       setSelectedRow(label)
       setSelectedSubRow(null)
       setProxyStatsMap({})
+      const detailLoadId = ++detailLoadIdRef.current
+      setDetailLoading(true)
 
-      const { start, end } = getTimeRange(timeRange)
-      let subs: AggregatedData[]
-      if (activeView === 'host') {
-        subs = await getDevicesByHost(label, start, end)
-      } else {
-        subs = await getSubStatsByHost(activeView, label, start, end)
+      try {
+        const { start, end } = getTimeRange(timeRange)
+        const subs =
+          activeView === 'host'
+            ? await getDevicesByHost(label, start, end)
+            : await getSubStatsByHost(activeView, label, start, end)
+        if (detailLoadId === detailLoadIdRef.current) {
+          setSubStats(subs)
+        }
+      } finally {
+        if (detailLoadId === detailLoadIdRef.current) {
+          setDetailLoading(false)
+        }
       }
-      setSubStats(subs)
     },
     [selectedRow, activeView, timeRange]
   )
@@ -123,14 +174,19 @@ const TrafficPage: React.FC = () => {
 
       if (proxyStatsMap[compositeKey]) return
       const { start, end } = getTimeRange(timeRange)
-      const proxies = await getProxyStatsByHost(activeView, parentLabel, subLabel, start, end)
-      setProxyStatsMap((prev) => ({ ...prev, [compositeKey]: proxies }))
+      setExpandingKey(compositeKey)
+      try {
+        const proxies = await getProxyStatsByHost(activeView, parentLabel, subLabel, start, end)
+        setProxyStatsMap((prev) => ({ ...prev, [compositeKey]: proxies }))
+      } finally {
+        setExpandingKey((current) => (current === compositeKey ? null : current))
+      }
     },
     [selectedSubRow, proxyStatsMap, activeView, timeRange]
   )
 
   const handleClearAll = useCallback(async () => {
-    await db.clearAll()
+    await clearTrafficUsageData()
     await load()
   }, [load])
 
@@ -231,6 +287,8 @@ const TrafficPage: React.FC = () => {
             proxyStatsMap={proxyStatsMap}
             selectedSubRow={selectedSubRow}
             onSubRowClick={handleSubRowClick}
+            isLoading={detailLoading}
+            expandingKey={expandingKey}
           />
         )}
       </div>

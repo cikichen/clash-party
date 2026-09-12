@@ -271,7 +271,6 @@ interface IAppConfig {
   enableSmartOverride: boolean
   smartCoreUseLightGBM: boolean
   smartCoreCollectData: boolean
-  smartCoreStrategy: 'sticky-sessions' | 'round-robin'
   smartCollectorSize?: number
   proxyDisplayMode: 'simple' | 'full'
   proxyDisplayOrder: 'default' | 'delay' | 'name'
@@ -301,6 +300,8 @@ interface IAppConfig {
   pauseSSID?: string[]
   disableDnsOnPauseSSID?: boolean
   controlDnsBeforePause?: boolean
+  ssidProfileMap?: Record<string, string>
+  ssidProfileRestore?: boolean
   mihomoCoreCardStatus?: CardStatus
   overrideCardStatus?: CardStatus
   profileCardStatus?: CardStatus
@@ -327,7 +328,7 @@ interface IAppConfig {
   autoQuitWithoutCoreMode?: 'core' | 'tray'
   useCustomSubStore?: boolean
   useProxyInSubStore?: boolean
-  pluginUseProxy?: boolean // 插件网关请求经由本地混合端口代理（安全保证降级，默认关闭）
+  pluginUseProxy?: boolean // 新装插件默认路由模式：true → proxy（安全保证降级），false → auto
   mihomoCpuPriority?: Priority
   coreStartupMode?: 'log' | 'post-up'
   customSubStoreUrl?: string
@@ -346,6 +347,8 @@ interface IAppConfig {
   appTheme: AppTheme
   customTheme?: string
   autoCheckUpdate: boolean
+  autoUpdateProfileOnStart: boolean
+  silentUpdate: boolean
   githubProxy?: string
   silentStart: boolean
   autoCloseConnection: boolean
@@ -353,6 +356,7 @@ interface IAppConfig {
   maxLogDays: number
   maxLogFileSize: number
   disableAppLog?: boolean
+  disableCoreLog?: boolean
   userAgent?: string
   delayTestConcurrency?: number
   delayTestUrl?: string
@@ -493,6 +497,12 @@ interface IMihomoConfig {
   'external-controller-pipe': string
   'external-controller-unix': string
   'external-controller': string
+  'external-ui': string
+  'external-ui-url': string
+  'external-controller-cors'?: {
+    'allow-origins'?: string[]
+    'allow-private-network'?: boolean
+  }
   secret?: string
   ipv6: boolean
   mode: OutboundMode
@@ -529,6 +539,10 @@ interface IMihomoConfig {
   sniffer: IMihomoSnifferConfig
   profile: IMihomoProfileConfig
 }
+
+// DNS 覆写切换结果；用户确认后原样回传来源指纹。
+type IControlDnsApplyResult =
+  { status: 'applied' } | { status: 'confirm-required'; confirmation: string }
 
 interface IProfileConfig {
   current?: string
@@ -590,6 +604,7 @@ interface IPluginProvider {
   name: string
   icon?: string
   site?: string
+  description?: string // §4 机场静态说明，≤500 码点，已清洗
 }
 
 // .cpx v2 — public, unencrypted descriptor. Contains NO secrets.
@@ -599,6 +614,8 @@ interface IPluginDescriptor {
   spec: 'cpx-plugin/2'
   loginUrl: string // OAuth authorize endpoint, https, no query/fragment
   provider: IPluginProvider
+  discoveryUrls?: string[] // §3 备用发现源：公网 https origin，1..8，去重，不含 loginUrl 的 origin
+  providerPubKey?: string // §5 Ed25519 原始 32 字节公钥，标准 base64 带 padding；每个 .cpx 谱系独立密钥
 }
 
 // Subset returned by previewPlugin for the install-confirm page (no records, no network)
@@ -608,6 +625,40 @@ interface IPluginDescriptorPreview {
   site?: string
   loginUrl: string // full url; UI shows the host
   spec: string
+  discoveryHosts?: string[] // §3 备用发现域名（纯文本 host）
+  description?: string // §4
+}
+
+// 发现结果（§3/§5）：来自任一发现源的归一化候选。seq 与 digest 成对出现（仅签名文档）。
+interface IDiscoveryCandidate {
+  gateways: string[]
+  endpoints: IGatewayEndpoints
+  seq?: number
+  digest?: string
+  loginUrl?: string
+  discoveryUrls?: string[]
+}
+
+// 签名发现文档的 payload（§5.2）
+interface IDiscoveryPayload {
+  spec: 'cpx-plugin/2'
+  seq: number // 1 ≤ seq ≤ 2^53−1
+  gateways: string[]
+  endpoints: IGatewayEndpoints
+  loginUrl?: string
+  discoveryUrls?: string[] // 缺失 = 不改；[] = 清空
+}
+
+// 有 providerPubKey 的插件在发现时携带：minSeq / currentDigest 来自 plugin.yaml
+interface DiscoverySigner {
+  pubKeyB64: string
+  minSeq?: number
+  currentDigest?: string
+}
+
+interface IPluginFilePayload {
+  name: string
+  fileBytesB64: string
 }
 
 interface IGatewayEndpoints {
@@ -617,14 +668,17 @@ interface IGatewayEndpoints {
   revoke: string
 }
 
-// /.well-known/cpx-gateway discovery response
+// /.well-known/cpx-gateway discovery response（归一化后）。线格式仍带 `gateway`（= gateways[0]）供旧客户端读取。
 interface IGatewayWellKnown {
   spec: 'cpx-plugin/2'
-  gateway: string // https origin, no path/query/fragment
+  gateways: string[] // https origins, no path/query/fragment; 1..3, deduplicated
   endpoints: IGatewayEndpoints
 }
 
 type IPluginStatus = 'needs-login' | 'active' | 'needs-reauth'
+
+// 路由模式：auto = 直连优先、失败回退代理（§1）；direct / proxy 为用户显式覆盖，不回退。
+type IPluginRouteMode = 'auto' | 'direct' | 'proxy'
 
 interface IPluginItem {
   id: string
@@ -637,6 +691,16 @@ interface IPluginItem {
   status: IPluginStatus
   interval?: number
   autoUpdate?: boolean
+  useProxy?: boolean // 过渡期镜像写：routeMode === 'proxy'；供降级到旧版本读取
+  routeMode?: IPluginRouteMode // §1；缺失时按 useProxy / 全局 pluginUseProxy 推导
+  lastGoodRoute?: 'direct' | 'proxy' // §1；仅 auto 模式读写，不是秘密
+  lastUpdateErrorReason?: 'blocked' | 'network' | 'server' // §4.2；客户端侧枚举，不含 host/IP
+  discoveryUrls?: string[] // §3 公开元数据，与 loginUrl 同级的静态信任根
+  description?: string // §4 机场静态说明
+  lastProviderMessage?: string // §4 上次失败时机场返回的 message；成功后清空
+  providerPubKey?: string // §5 公开元数据
+  discoverySeq?: number // §5 提交标记，与 discoveryDigest 成对（同时存在或同时缺失）
+  discoveryDigest?: string // §5 SHA-256(payloadBytes) hex
   created: number
   updated: number
   lastUpdateErrorType?: 'auth' | 'transient'
@@ -649,12 +713,24 @@ interface IPluginConfig {
   items: IPluginItem[]
 }
 
+// 缓存的网关状态（§2.3）。写出时始终镜像 gateway.gateway = lastGood ?? gateways[0]，供降级到旧版本读取。
+interface IPluginGatewayState {
+  gateway: string // 过渡期镜像：= lastGood ?? gateways[0]
+  gateways: string[] // 归一化后，1..3
+  endpoints: IGatewayEndpoints
+  lastGood?: string // 必须 ∈ gateways，否则视为未设置
+}
+
 // safeStorage-encrypted vault payload — the ONLY place secrets live.
 interface IPluginVault {
   devicePrivKey: string // Ed25519 raw 32-byte seed, base64 (standard, padded)
   deviceId: string // UUIDv4
-  gateway: {
-    gateway: string // discovered https origin (cached for silent updates)
-    endpoints: IGatewayEndpoints
-  }
+  gateway: IPluginGatewayState
+  // 被新设备替换、但尚未在服务端回收的旧设备：重新登录成功后 best-effort 回收，失败留在这里等下次拉取 / 删除
+  staleDevices?: IPluginStaleDevice[]
+}
+
+interface IPluginStaleDevice {
+  deviceId: string
+  devicePrivKey: string
 }

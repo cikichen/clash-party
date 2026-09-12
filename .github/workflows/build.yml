@@ -121,6 +121,9 @@ jobs:
           GITHUB_EVENT_NAME: workflow_dispatch
         run: node scripts/update-version.mjs
       - name: Prepare
+        env:
+          npm_config_arch: ${{ matrix.arch }}
+          npm_config_target_arch: ${{ matrix.arch }}
         run: pnpm prepare --${{ matrix.arch }}
       - name: Build
         env:
@@ -206,6 +209,8 @@ jobs:
         run: node scripts/update-version.mjs
       - name: Prepare
         env:
+          npm_config_arch: ${{ matrix.arch }}
+          npm_config_target_arch: ${{ matrix.arch }}
           LEGACY_BUILD: 'true'
         run: pnpm prepare --${{ matrix.arch }}
       - name: Build
@@ -283,12 +288,19 @@ jobs:
         run: |
           pnpm install
           sed -i "s/productName: Clash Party/productName: clash-party/" electron-builder.yml
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools
       - name: Update Version for Dev Build
         if: github.event_name == 'workflow_dispatch'
         env:
           GITHUB_EVENT_NAME: workflow_dispatch
         run: node scripts/update-version.mjs
       - name: Prepare
+        env:
+          npm_config_arch: ${{ matrix.arch }}
+          npm_config_target_arch: ${{ matrix.arch }}
         run: pnpm prepare --${{ matrix.arch }}
       - name: Build
         env:
@@ -296,7 +308,7 @@ jobs:
           npm_config_target_arch: ${{ matrix.arch }}
         run: pnpm build:linux --${{ matrix.arch }}
       - name: Generate checksums
-        run: pnpm checksum .deb .rpm
+        run: pnpm checksum .deb .rpm .pkg.tar.zst
       - name: Copy Legacy Artifacts
         run: pnpm copy-legacy
       - name: Upload Artifacts
@@ -308,6 +320,7 @@ jobs:
             dist/*.sha256
             dist/*.deb
             dist/*.rpm
+            dist/*.pkg.tar.zst
           if-no-files-found: error
       - name: Publish Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -317,6 +330,7 @@ jobs:
             dist/*.sha256
             dist/*.deb
             dist/*.rpm
+            dist/*.pkg.tar.zst
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish Dev Release
         if: github.event_name == 'workflow_dispatch'
@@ -327,6 +341,7 @@ jobs:
             dist/*.sha256
             dist/*.deb
             dist/*.rpm
+            dist/*.pkg.tar.zst
           prerelease: true
           draft: false
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -362,6 +377,9 @@ jobs:
           GITHUB_EVENT_NAME: workflow_dispatch
         run: node scripts/update-version.mjs
       - name: Prepare
+        env:
+          npm_config_arch: ${{ matrix.arch }}
+          npm_config_target_arch: ${{ matrix.arch }}
         run: pnpm prepare --${{ matrix.arch }}
       - name: Build
         env:
@@ -388,6 +406,7 @@ jobs:
             productsign --sign "Developer ID Installer: Prometheus Advertising Corp (489PDK5LP3)" Unsigned-Workbench.pkg $pkg_name
             rm -f Unsigned-Workbench.pkg
             xcrun notarytool submit $pkg_name --apple-id $APPLE_ID --team-id $APPLE_TEAM_ID --password $APPLE_APP_SPECIFIC_PASSWORD --wait
+            xcrun stapler staple $pkg_name
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -460,6 +479,9 @@ jobs:
           GITHUB_EVENT_NAME: workflow_dispatch
         run: node scripts/update-version.mjs
       - name: Prepare
+        env:
+          npm_config_arch: ${{ matrix.arch }}
+          npm_config_target_arch: ${{ matrix.arch }}
         run: pnpm prepare --${{ matrix.arch }}
       - name: Build
         env:
@@ -487,6 +509,7 @@ jobs:
             productsign --sign "Developer ID Installer: Prometheus Advertising Corp (489PDK5LP3)" Unsigned-Workbench.pkg $pkg_name
             rm -f Unsigned-Workbench.pkg
             xcrun notarytool submit $pkg_name --apple-id $APPLE_ID --team-id $APPLE_TEAM_ID --password $APPLE_APP_SPECIFIC_PASSWORD --wait
+            xcrun stapler staple $pkg_name
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
